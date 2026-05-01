@@ -50,7 +50,11 @@ export async function retryPost<T>(
   let lastErr: unknown;
   for (let i = 0; i < retries; i++) {
     try {
-      const res = await axios.post<T>(url, data, { ...config, timeout: 30000 });
+      const res = await axios.post<T>(url, data, {
+        ...config,
+        timeout: 30000,
+        validateStatus: () => true,
+      });
       return res.data;
     } catch (err) {
       lastErr = err;
@@ -69,7 +73,11 @@ export async function retryGet<T>(
   let lastErr: unknown;
   for (let i = 0; i < retries; i++) {
     try {
-      const res = await axios.get<T>(url, { ...config, timeout: 15000 });
+      const res = await axios.get<T>(url, {
+        ...config,
+        timeout: 15000,
+        validateStatus: () => true,
+      });
       return res.data;
     } catch (err) {
       lastErr = err;

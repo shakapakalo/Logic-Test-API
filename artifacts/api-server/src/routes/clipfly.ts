@@ -133,7 +133,7 @@ router.post("/text-to-image", async (req: Request, res: Response) => {
     if (data.code === 0 && data.data?.[0]?.queue_id) {
       res.json({ success: true, queue_id: data.data[0].queue_id });
     } else {
-      res.status(502).json({ success: false, error: data.msg ?? "Task submission failed" });
+      res.status(502).json({ success: false, error: data.msg ?? "Task submission failed", raw: data });
     }
   } catch (err) {
     req.log.error(err);
@@ -181,7 +181,7 @@ router.post("/image-to-image", async (req: Request, res: Response) => {
     if (data.code === 0 && data.data?.[0]?.queue_id) {
       res.json({ success: true, queue_id: data.data[0].queue_id });
     } else {
-      res.status(502).json({ success: false, error: data.msg ?? "Task submission failed" });
+      res.status(502).json({ success: false, error: data.msg ?? "Task submission failed", raw: data });
     }
   } catch (err) {
     req.log.error(err);
@@ -236,7 +236,7 @@ router.post("/image-combination", async (req: Request, res: Response) => {
     if (data.code === 0 && data.data?.[0]?.queue_id) {
       res.json({ success: true, queue_id: data.data[0].queue_id });
     } else {
-      res.status(502).json({ success: false, error: data.msg ?? "Task submission failed" });
+      res.status(502).json({ success: false, error: data.msg ?? "Task submission failed", raw: data });
     }
   } catch (err) {
     req.log.error(err);
@@ -306,7 +306,7 @@ router.post("/text-to-video", async (req: Request, res: Response) => {
     if (data.code === 0 && data.data?.id) {
       res.json({ success: true, queue_id: data.data.id });
     } else {
-      res.status(502).json({ success: false, error: data.msg ?? "Task submission failed" });
+      res.status(502).json({ success: false, error: data.msg ?? "Task submission failed", raw: data });
     }
   } catch (err) {
     req.log.error(err);
@@ -387,7 +387,7 @@ router.post("/image-to-video", async (req: Request, res: Response) => {
     if (data.code === 0 && data.data?.id) {
       res.json({ success: true, queue_id: data.data.id });
     } else {
-      res.status(502).json({ success: false, error: data.msg ?? "Task submission failed" });
+      res.status(502).json({ success: false, error: data.msg ?? "Task submission failed", raw: data });
     }
   } catch (err) {
     req.log.error(err);
@@ -400,10 +400,11 @@ router.post("/image-to-video", async (req: Request, res: Response) => {
  * Poll the status of an image generation task.
  */
 router.get("/image-status", async (req: Request, res: Response) => {
-  const { queue_id, token } = req.query as { queue_id: string; token: string };
+  const { queue_id } = req.query as { queue_id: string };
+  const token = (req.query.token as string) || (req.headers.authorization as string);
 
   if (!queue_id || !token) {
-    res.status(400).json({ success: false, error: "queue_id and token are required" });
+    res.status(400).json({ success: false, error: "queue_id and token (query or Authorization header) are required" });
     return;
   }
 
@@ -444,10 +445,11 @@ router.get("/image-status", async (req: Request, res: Response) => {
  * Poll the status of a video generation task.
  */
 router.get("/video-status", async (req: Request, res: Response) => {
-  const { queue_id, token } = req.query as { queue_id: string; token: string };
+  const { queue_id } = req.query as { queue_id: string };
+  const token = (req.query.token as string) || (req.headers.authorization as string);
 
   if (!queue_id || !token) {
-    res.status(400).json({ success: false, error: "queue_id and token are required" });
+    res.status(400).json({ success: false, error: "queue_id and token (query or Authorization header) are required" });
     return;
   }
 

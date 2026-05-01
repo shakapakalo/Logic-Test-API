@@ -167,10 +167,10 @@ router.post("/video-gen", async (req: Request, res: Response) => {
  */
 router.get("/status/:uuid", async (req: Request, res: Response) => {
   const { uuid } = req.params;
-  const { access_token } = req.query as { access_token: string };
+  const access_token = (req.query.access_token as string) || (req.headers.authorization as string)?.replace("Bearer ", "");
 
   if (!uuid || !access_token) {
-    res.status(400).json({ success: false, error: "uuid and access_token are required" });
+    res.status(400).json({ success: false, error: "uuid and access_token (query or Authorization header) are required" });
     return;
   }
 
