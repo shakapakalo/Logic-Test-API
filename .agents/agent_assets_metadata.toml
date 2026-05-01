@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "MLTTARdDB_UqtUw7NomU5"
+uri = "file://ai-api-server.tar.gz"
+type = "unspecified"
+title = "AI API Server — GitHub Repo (tar.gz)"
