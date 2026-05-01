@@ -1,8 +1,12 @@
 import { Router, type IRouter } from "express";
-import healthRouter from "./health";
+import healthRouter from "./health.js";
+import clipflyRouter from "./clipfly.js";
+import geminigenRouter from "./geminigen.js";
 
 const router: IRouter = Router();
 
 router.use(healthRouter);
+router.use("/clipfly", clipflyRouter);
+router.use("/geminigen", geminigenRouter);
 
 export default router;
