@@ -16,99 +16,81 @@ const DIMS: Record<string, [number, number]> = {
   "21:9": [3264, 1408],
 };
 
-function randomStr(len: number) {
-  return randomBytes(len).toString("hex").slice(0, len);
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+async function freshToken(): Promise<string> {
+  for (let i = 0; i < 10; i++) {
+    try {
+      const username = randomBytes(6).toString("hex");
+      const email = `${username}@znsj.com`;
+      const password = "User" + randomBytes(5).toString("hex") + "!";
+      const data = await retryPost<{ code: number; data?: { token?: { token: string } } }>(
+        `${CLIPFLY_BASE}/api/v1/account/register`,
+        { email, password, ref: null, activity_id: null, invitor_id: null },
+        { headers: clipflyHeaders() },
+        1,
+      );
+      if (data.code === 0 && data.data?.token?.token) {
+        return data.data.token.token;
+      }
+    } catch {
+      /* retry */
+    }
+  }
+  throw new Error("Failed to auto-register Clipfly account after 10 attempts");
 }
 
-/**
- * POST /api/clipfly/register
- * Auto-registers a Clipfly account and returns a token.
- */
-router.post("/register", async (req: Request, res: Response) => {
-  try {
-    const username = randomStr(10);
-    const email = `${username}@znsj.com`;
-    const password = "User" + randomStr(8) + "!";
-
-    const data = await retryPost<{ code: number; data?: { token?: { token: string } }; msg?: string }>(
-      `${CLIPFLY_BASE}/api/v1/account/register`,
-      { email, password, ref: null, activity_id: null, invitor_id: null },
-      { headers: clipflyHeaders() },
-    );
-
-    if (data.code === 0 && data.data?.token?.token) {
-      res.json({ success: true, token: data.data.token.token, email, password });
-    } else {
-      res.status(502).json({ success: false, error: data.msg ?? "Registration failed" });
-    }
-  } catch (err: unknown) {
-    req.log.error(err);
-    res.status(500).json({ success: false, error: String(err) });
-  }
-});
-
-/**
- * POST /api/clipfly/upload
- * Upload a base64-encoded image to Clipfly storage.
- * Body: { token, base64, filename }
- */
-router.post("/upload", async (req: Request, res: Response) => {
-  const { token, base64, filename = "image.jpg" } = req.body as {
-    token: string;
-    base64: string;
-    filename?: string;
-  };
-
-  if (!token || !base64) {
-    res.status(400).json({ success: false, error: "token and base64 are required" });
-    return;
-  }
-
+async function uploadImage(
+  base64: string,
+  filename: string,
+  token: string,
+): Promise<{ storage_path: string; material_id: string }> {
   const mimeType = filename.endsWith(".png") ? "image/png" : "image/jpeg";
   const content = base64.startsWith("data:") ? base64 : `data:${mimeType};base64,${base64}`;
 
-  try {
-    const data = await retryPost<{
-      code: number;
-      data?: { storage_path: string; user_id?: string };
-      msg?: string;
-    }>(
-      `${CLIPFLY_BASE}/api/v1/common/upload/base64`,
-      { content, name: filename, file_type: "image", is_original_name: 0, prefix_path: "/uploads" },
-      { headers: clipflyHeaders(token) },
-    );
+  const data = await retryPost<{
+    code: number;
+    data?: { storage_path: string; user_id?: string };
+    msg?: string;
+  }>(
+    `${CLIPFLY_BASE}/api/v1/common/upload/base64`,
+    { content, name: filename, file_type: "image", is_original_name: 0, prefix_path: "/uploads" },
+    { headers: clipflyHeaders(token) },
+  );
 
-    if (data.code === 0 && data.data?.storage_path) {
-      res.json({ success: true, storage_path: data.data.storage_path, user_id: data.data.user_id });
-    } else {
-      res.status(502).json({ success: false, error: data.msg ?? "Upload failed" });
-    }
-  } catch (err) {
-    req.log.error(err);
-    res.status(500).json({ success: false, error: String(err) });
+  if (data.code === 0 && data.data?.storage_path) {
+    return {
+      storage_path: data.data.storage_path,
+      material_id: String(data.data.user_id ?? data.data.storage_path.split("/")[3]),
+    };
   }
-});
+  throw new Error(data.msg ?? "Image upload failed");
+}
+
+// ─── Routes ───────────────────────────────────────────────────────────────────
 
 /**
  * POST /api/clipfly/text-to-image
- * Generate an image from a text prompt.
- * Body: { token, prompt, size_id? }
+ * Auto-creates a new account each call.
+ * Body: { prompt, size_id? }
+ * Returns: { success, queue_id, token }
  */
 router.post("/text-to-image", async (req: Request, res: Response) => {
-  const { token, prompt, size_id = "9:16" } = req.body as {
-    token: string;
+  const { prompt, size_id = "9:16" } = req.body as {
     prompt: string;
     size_id?: string;
   };
 
-  if (!token || !prompt) {
-    res.status(400).json({ success: false, error: "token and prompt are required" });
+  if (!prompt) {
+    res.status(400).json({ success: false, error: "prompt is required" });
     return;
   }
 
   const [width, height] = DIMS[size_id] ?? DIMS["9:16"];
 
   try {
+    const token = await freshToken();
+
     const data = await retryPost<{
       code: number;
       data?: Array<{ queue_id: string }>;
@@ -131,7 +113,7 @@ router.post("/text-to-image", async (req: Request, res: Response) => {
     );
 
     if (data.code === 0 && data.data?.[0]?.queue_id) {
-      res.json({ success: true, queue_id: data.data[0].queue_id });
+      res.json({ success: true, queue_id: data.data[0].queue_id, token });
     } else {
       res.status(502).json({ success: false, error: data.msg ?? "Task submission failed", raw: data });
     }
@@ -143,23 +125,26 @@ router.post("/text-to-image", async (req: Request, res: Response) => {
 
 /**
  * POST /api/clipfly/image-to-image
- * Transform an existing image using a prompt.
- * Body: { token, prompt, source_image (storage_path), material_id }
+ * Auto-creates a new account, uploads the image, submits task.
+ * Body: { prompt, base64, filename? }
+ * Returns: { success, queue_id, token }
  */
 router.post("/image-to-image", async (req: Request, res: Response) => {
-  const { token, prompt, source_image, material_id } = req.body as {
-    token: string;
+  const { prompt, base64, filename = "image.jpg" } = req.body as {
     prompt: string;
-    source_image: string;
-    material_id: string;
+    base64: string;
+    filename?: string;
   };
 
-  if (!token || !prompt || !source_image || !material_id) {
-    res.status(400).json({ success: false, error: "token, prompt, source_image, and material_id are required" });
+  if (!prompt || !base64) {
+    res.status(400).json({ success: false, error: "prompt and base64 are required" });
     return;
   }
 
   try {
+    const token = await freshToken();
+    const { storage_path, material_id } = await uploadImage(base64, filename, token);
+
     const data = await retryPost<{
       code: number;
       data?: Array<{ queue_id: string }>;
@@ -170,7 +155,7 @@ router.post("/image-to-image", async (req: Request, res: Response) => {
         type: 22,
         prompt,
         gnum: 1,
-        source_image,
+        source_image: storage_path,
         materialId: material_id,
         model_id: "nanobanana2",
         is_scale: 1,
@@ -179,7 +164,7 @@ router.post("/image-to-image", async (req: Request, res: Response) => {
     );
 
     if (data.code === 0 && data.data?.[0]?.queue_id) {
-      res.json({ success: true, queue_id: data.data[0].queue_id });
+      res.json({ success: true, queue_id: data.data[0].queue_id, token });
     } else {
       res.status(502).json({ success: false, error: data.msg ?? "Task submission failed", raw: data });
     }
@@ -191,26 +176,34 @@ router.post("/image-to-image", async (req: Request, res: Response) => {
 
 /**
  * POST /api/clipfly/image-combination
- * Combine multiple images with a prompt.
- * Body: { token, prompt, source_images: string[], material_ids: string[], size_id? }
+ * Auto-creates a new account, uploads all images, submits task.
+ * Body: { prompt, images: [{ base64, filename }], size_id? }
+ * Returns: { success, queue_id, token }
  */
 router.post("/image-combination", async (req: Request, res: Response) => {
-  const { token, prompt, source_images, material_ids, size_id = "1:1" } = req.body as {
-    token: string;
+  const { prompt, images, size_id = "1:1" } = req.body as {
     prompt: string;
-    source_images: string[];
-    material_ids: string[];
+    images: Array<{ base64: string; filename?: string }>;
     size_id?: string;
   };
 
-  if (!token || !prompt || !Array.isArray(source_images) || !Array.isArray(material_ids)) {
-    res.status(400).json({ success: false, error: "token, prompt, source_images[], and material_ids[] are required" });
+  if (!prompt || !Array.isArray(images) || images.length < 2) {
+    res.status(400).json({ success: false, error: "prompt and images[] (at least 2) are required" });
     return;
   }
 
   const [width, height] = DIMS[size_id] ?? DIMS["1:1"];
 
   try {
+    const token = await freshToken();
+
+    const uploaded = await Promise.all(
+      images.map((img, i) => uploadImage(img.base64, img.filename ?? `image_${i}.jpg`, token)),
+    );
+
+    const source_images = uploaded.map((u) => u.storage_path);
+    const material_ids = uploaded.map((u) => u.material_id);
+
     const data = await retryPost<{
       code: number;
       data?: Array<{ queue_id: string }>;
@@ -234,7 +227,7 @@ router.post("/image-combination", async (req: Request, res: Response) => {
     );
 
     if (data.code === 0 && data.data?.[0]?.queue_id) {
-      res.json({ success: true, queue_id: data.data[0].queue_id });
+      res.json({ success: true, queue_id: data.data[0].queue_id, token });
     } else {
       res.status(502).json({ success: false, error: data.msg ?? "Task submission failed", raw: data });
     }
@@ -246,26 +239,25 @@ router.post("/image-combination", async (req: Request, res: Response) => {
 
 /**
  * POST /api/clipfly/text-to-video
- * Generate a video from a text prompt.
- * Body: { token, prompt, audio?, model?, ratio? }
+ * Auto-creates a new account each call.
+ * Body: { prompt, model?, ratio? }
+ * Returns: { success, queue_id, token }
  */
 router.post("/text-to-video", async (req: Request, res: Response) => {
   const {
-    token,
     prompt,
     audio = "",
     model = "wan",
-    ratio = "9:16",
+    ratio = "16:9",
   } = req.body as {
-    token: string;
     prompt: string;
     audio?: string;
     model?: "seedance" | "wan";
     ratio?: string;
   };
 
-  if (!token || !prompt) {
-    res.status(400).json({ success: false, error: "token and prompt are required" });
+  if (!prompt) {
+    res.status(400).json({ success: false, error: "prompt is required" });
     return;
   }
 
@@ -273,6 +265,8 @@ router.post("/text-to-video", async (req: Request, res: Response) => {
   const duration = model === "seedance" ? "5" : "10";
 
   try {
+    const token = await freshToken();
+
     const data = await retryPost<{
       code: number;
       data?: { id: string };
@@ -304,7 +298,7 @@ router.post("/text-to-video", async (req: Request, res: Response) => {
     );
 
     if (data.code === 0 && data.data?.id) {
-      res.json({ success: true, queue_id: data.data.id });
+      res.json({ success: true, queue_id: data.data.id, token });
     } else {
       res.status(502).json({ success: false, error: data.msg ?? "Task submission failed", raw: data });
     }
@@ -316,42 +310,46 @@ router.post("/text-to-video", async (req: Request, res: Response) => {
 
 /**
  * POST /api/clipfly/image-to-video
- * Generate a video from an uploaded image.
- * Body: { token, prompt, source_image (storage_path), audio?, model? }
+ * Auto-creates a new account, uploads the image, submits task.
+ * Body: { prompt, base64, filename?, model? }
+ * Returns: { success, queue_id, token }
  */
 router.post("/image-to-video", async (req: Request, res: Response) => {
   const {
-    token,
     prompt,
-    source_image,
+    base64,
+    filename = "image.jpg",
     audio = "",
     model = "wan",
   } = req.body as {
-    token: string;
     prompt: string;
-    source_image: string;
+    base64: string;
+    filename?: string;
     audio?: string;
     model?: "seedance" | "lumen" | "wan";
   };
 
-  if (!token || !prompt || !source_image) {
-    res.status(400).json({ success: false, error: "token, prompt, and source_image are required" });
+  if (!prompt || !base64) {
+    res.status(400).json({ success: false, error: "prompt and base64 are required" });
     return;
   }
 
   let model_id: string;
-  let material_id: string;
+  let material_id_static: string;
   const duration = "10";
 
   if (model === "seedance") {
-    model_id = "25"; material_id = "966489002510778368";
+    model_id = "25"; material_id_static = "966489002510778368";
   } else if (model === "lumen") {
-    model_id = "17"; material_id = "969029917515165696";
+    model_id = "17"; material_id_static = "969029917515165696";
   } else {
-    model_id = "29"; material_id = "966341557070827520";
+    model_id = "29"; material_id_static = "966341557070827520";
   }
 
   try {
+    const token = await freshToken();
+    const { storage_path } = await uploadImage(base64, filename, token);
+
     const data = await retryPost<{
       code: number;
       data?: { id: string };
@@ -365,13 +363,13 @@ router.post("/image-to-video", async (req: Request, res: Response) => {
             maskImage: "",
             prompt,
             camera_control: "auto",
-            source_image,
+            source_image: storage_path,
             img_style_id: "111",
-            materialId: material_id,
+            materialId: material_id_static,
             is_scale: 0,
             negative_prompt: "",
             from: "image",
-            urls: { url: source_image },
+            urls: { url: storage_path },
             voice: audio,
             model_id,
             camerafixed: false,
@@ -385,7 +383,7 @@ router.post("/image-to-video", async (req: Request, res: Response) => {
     );
 
     if (data.code === 0 && data.data?.id) {
-      res.json({ success: true, queue_id: data.data.id });
+      res.json({ success: true, queue_id: data.data.id, token });
     } else {
       res.status(502).json({ success: false, error: data.msg ?? "Task submission failed", raw: data });
     }
@@ -397,7 +395,7 @@ router.post("/image-to-video", async (req: Request, res: Response) => {
 
 /**
  * GET /api/clipfly/image-status?queue_id=...
- * Poll the status of an image generation task.
+ * Requires: Authorization header (token returned from POST)
  */
 router.get("/image-status", async (req: Request, res: Response) => {
   const { queue_id } = req.query as { queue_id: string };
@@ -442,7 +440,7 @@ router.get("/image-status", async (req: Request, res: Response) => {
 
 /**
  * GET /api/clipfly/video-status?queue_id=...
- * Poll the status of a video generation task.
+ * Requires: Authorization header (token returned from POST)
  */
 router.get("/video-status", async (req: Request, res: Response) => {
   const { queue_id } = req.query as { queue_id: string };

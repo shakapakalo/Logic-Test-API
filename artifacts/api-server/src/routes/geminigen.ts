@@ -9,23 +9,30 @@ const router = Router();
 
 const GEMINIGEN_XTOKEN = "7822db02280a28d61d6a75d199af010e";
 
-/**
- * POST /api/geminigen/token
- * Activate a new GeminiGen account and return an access token.
- */
-router.post("/token", async (req: Request, res: Response) => {
-  const url = `${GEMINIGEN_BASE}/mobile/v1/uuid/activate-account`;
+// ─── Internal helpers ─────────────────────────────────────────────────────────
 
+function generateDeviceToken(): string {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const rand = (n: number) =>
+    Array.from({ length: n }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  return `${rand(22)}:${rand(140)}`;
+}
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function freshGeminiToken(): Promise<string> {
+  const url = `${GEMINIGEN_BASE}/mobile/v1/uuid/activate-account`;
   for (let i = 0; i < 10; i++) {
     try {
       const timestamp = String(Math.floor(Date.now() / 1000));
-      const deviceToken = generateDeviceToken();
       const resp = await axios.post(
         url,
         {
           mobile_device_uuid: randomUUID().replace(/-/g, "").slice(0, 16),
           platform: "GenV-APP",
-          device_token: deviceToken,
+          device_token: generateDeviceToken(),
           device_type: "android",
         },
         {
@@ -38,139 +45,152 @@ router.post("/token", async (req: Request, res: Response) => {
           timeout: 15000,
         },
       );
-
       const token = resp.data?.access_token;
-      if (token) {
-        res.json({ success: true, access_token: token });
-        return;
-      }
+      if (token) return token;
     } catch {
       await sleep(2000);
     }
   }
+  throw new Error("Failed to obtain GeminiGen token after 10 attempts");
+}
 
-  res.status(502).json({ success: false, error: "Failed to obtain GeminiGen token after 10 attempts" });
-});
+// ─── Routes ───────────────────────────────────────────────────────────────────
 
 /**
  * POST /api/geminigen/video-gen
- * Generate a video using Veo or Grok model.
+ * Auto-creates a new GeminiGen account each call.
  * Body: {
- *   access_token,
  *   prompt,
- *   model: "veo_fast" | "veo_lite" | "grok",
+ *   model?: "veo_fast" | "veo_lite" | "grok",
  *   aspect_ratio?: "16:9" | "9:16" | "1:1",
- *   images?: [{ base64: string, filename: string }]  // optional, up to 3 for grok
+ *   images?: [{ base64: string, filename?: string }]   // optional, up to 3 for grok
  * }
+ * Returns: { success, uuid, access_token }
  */
 router.post("/video-gen", async (req: Request, res: Response) => {
   const {
-    access_token,
     prompt,
     model = "veo_fast",
     aspect_ratio = "16:9",
     images = [],
   } = req.body as {
-    access_token: string;
     prompt: string;
     model?: "veo_fast" | "veo_lite" | "grok";
     aspect_ratio?: string;
-    images?: Array<{ base64: string; filename: string }>;
+    images?: Array<{ base64: string; filename?: string }>;
   };
 
-  if (!access_token || !prompt) {
-    res.status(400).json({ success: false, error: "access_token and prompt are required" });
+  if (!prompt) {
+    res.status(400).json({ success: false, error: "prompt is required" });
     return;
   }
 
-  for (let attempt = 0; attempt < 10; attempt++) {
-    try {
-      if (model === "veo_fast" || model === "veo_lite") {
-        const modelPayload = model === "veo_fast" ? "veo-3.1-fast" : "veo-3.1-lite";
-        const url = `${GEMINIGEN_BASE}/mobile/v3/video-gen`;
+  try {
+    const access_token = await freshGeminiToken();
 
-        const form = new FormData();
-        form.append("prompt", prompt);
-        form.append("model", modelPayload);
-        form.append("duration", "8");
-        form.append("resolution", "720p");
-        form.append("aspect_ratio", aspect_ratio);
-        form.append("service_mode", "stable");
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        if (model === "veo_fast" || model === "veo_lite") {
+          const modelPayload = model === "veo_fast" ? "veo-3.1-fast" : "veo-3.1-lite";
+          const url = `${GEMINIGEN_BASE}/mobile/v3/video-gen`;
 
-        for (const img of images) {
-          const buf = Buffer.from(img.base64.replace(/^data:[^;]+;base64,/, ""), "base64");
-          form.append("image", buf, { filename: img.filename, contentType: "image/jpeg" });
+          const form = new FormData();
+          form.append("prompt", prompt);
+          form.append("model", modelPayload);
+          form.append("duration", "8");
+          form.append("resolution", "720p");
+          form.append("aspect_ratio", aspect_ratio);
+          form.append("service_mode", "stable");
+
+          for (const [i, img] of images.entries()) {
+            const buf = Buffer.from(img.base64.replace(/^data:[^;]+;base64,/, ""), "base64");
+            form.append("image", buf, { filename: img.filename ?? `image_${i}.jpg`, contentType: "image/jpeg" });
+          }
+
+          const resp = await axios.post(url, form, {
+            headers: { ...geminiHeaders(access_token), ...form.getHeaders() },
+            timeout: 30000,
+          });
+
+          const uuid = resp.data?.uuid;
+          if (uuid) {
+            res.json({ success: true, uuid, access_token });
+            return;
+          }
+
+        } else if (model === "grok") {
+          const url = `${GEMINIGEN_BASE}/mobile/v3/video-gen/grok-stream`;
+
+          const form = new FormData();
+          form.append("mode", "custom");
+          form.append("prompt", prompt);
+          form.append("model", "grok-video");
+          form.append("resolution", "720p");
+          form.append("aspect_ratio", aspect_ratio);
+          form.append("duration", "10");
+          form.append("turnstile_token", "string");
+          form.append("service_mode", "stable");
+
+          for (const [i, img] of images.entries()) {
+            const buf = Buffer.from(img.base64.replace(/^data:[^;]+;base64,/, ""), "base64");
+            form.append("files", buf, { filename: img.filename ?? `image_${i}.jpg`, contentType: "image/jpeg" });
+          }
+
+          const resp = await axios.post(url, form, {
+            headers: { ...geminiHeaders(access_token), ...form.getHeaders() },
+            responseType: "text",
+            timeout: 30000,
+          });
+
+          const lines = String(resp.data).split("\n");
+          let found: string | null = null;
+          for (const line of lines) {
+            const cleaned = line.startsWith("data: ") ? line.slice(6) : line;
+            try {
+              const json = JSON.parse(cleaned);
+              if (json.history_uuid) { found = json.history_uuid; break; }
+            } catch { /* skip */ }
+          }
+
+          if (found) {
+            res.json({ success: true, uuid: found, access_token });
+            return;
+          }
         }
-
-        const resp = await axios.post(url, form, {
-          headers: { ...geminiHeaders(access_token), ...form.getHeaders() },
-          timeout: 30000,
-        });
-
-        const uuid = resp.data?.uuid;
-        if (uuid) {
-          res.json({ success: true, uuid });
-          return;
-        }
-      } else if (model === "grok") {
-        const url = `${GEMINIGEN_BASE}/mobile/v3/video-gen/grok-stream`;
-
-        const form = new FormData();
-        form.append("mode", "custom");
-        form.append("prompt", prompt);
-        form.append("model", "grok-video");
-        form.append("resolution", "720p");
-        form.append("aspect_ratio", aspect_ratio);
-        form.append("duration", "10");
-        form.append("turnstile_token", "string");
-        form.append("service_mode", "stable");
-
-        for (const img of images) {
-          const buf = Buffer.from(img.base64.replace(/^data:[^;]+;base64,/, ""), "base64");
-          form.append("files", buf, { filename: img.filename, contentType: "image/jpeg" });
-        }
-
-        const resp = await axios.post(url, form, {
-          headers: { ...geminiHeaders(access_token), ...form.getHeaders() },
-          responseType: "text",
-          timeout: 30000,
-        });
-
-        const lines = String(resp.data).split("\n");
-        let found: string | null = null;
-        for (const line of lines) {
-          const cleaned = line.startsWith("data: ") ? line.slice(6) : line;
-          try {
-            const json = JSON.parse(cleaned);
-            if (json.history_uuid) { found = json.history_uuid; break; }
-          } catch { /* skip */ }
-        }
-
-        if (found) {
-          res.json({ success: true, uuid: found });
-          return;
-        }
+      } catch (err) {
+        req.log.warn({ attempt, err }, "geminigen video-gen attempt failed, retrying with new token");
+        // Get a fresh token on retry
+        try {
+          const newToken = await freshGeminiToken();
+          Object.assign(req, { _geminiToken: newToken });
+        } catch { /* ignore */ }
+        await sleep(3000);
       }
-    } catch (err) {
-      req.log.warn({ attempt, err }, "geminigen video-gen attempt failed");
-      await sleep(3000);
     }
-  }
 
-  res.status(502).json({ success: false, error: "Failed to submit GeminiGen video task after 10 attempts" });
+    res.status(502).json({ success: false, error: "Failed to submit GeminiGen video task after 10 attempts" });
+  } catch (err) {
+    req.log.error(err);
+    res.status(500).json({ success: false, error: String(err) });
+  }
 });
 
 /**
  * GET /api/geminigen/status/:uuid
  * Check the status of a GeminiGen video generation task.
- * Query: ?access_token=...
+ * Requires: ?access_token=... (returned from /video-gen)
  */
 router.get("/status/:uuid", async (req: Request, res: Response) => {
   const { uuid } = req.params;
-  const access_token = (req.query.access_token as string) || (req.headers.authorization as string)?.replace("Bearer ", "");
+  const access_token =
+    (req.query.access_token as string) ||
+    (req.headers.authorization as string)?.replace("Bearer ", "");
 
   if (!uuid || !access_token) {
-    res.status(400).json({ success: false, error: "uuid and access_token (query or Authorization header) are required" });
+    res.status(400).json({
+      success: false,
+      error: "uuid and access_token (query param or Authorization header) are required",
+    });
     return;
   }
 
@@ -197,15 +217,5 @@ router.get("/status/:uuid", async (req: Request, res: Response) => {
     res.status(500).json({ success: false, error: String(err) });
   }
 });
-
-function generateDeviceToken(): string {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-  const rand = (n: number) => Array.from({ length: n }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-  return `${rand(22)}:${rand(140)}`;
-}
-
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 export default router;
